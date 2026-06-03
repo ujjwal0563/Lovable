@@ -1,0 +1,984 @@
+# Lovable.dev Clone — Complete Architecture & Build Guide
+
+> A system-wise breakdown of how to build a Lovable.dev clone: what it is, the stack, every file, the database, the AI loop, and the build order.
+
+---
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [Core Capabilities](#2-core-capabilities)
+3. [Recommended Tech Stack](#3-recommended-tech-stack)
+4. [High-Level System Architecture](#4-high-level-system-architecture)
+5. [Folder & File Structure](#5-folder--file-structure)
+6. [File-by-File Responsibilities](#6-file-by-file-responsibilities)
+7. [Database Schema](#7-database-schema)
+8. [The AI Loop (End-to-End Flow)](#8-the-ai-loop-end-to-end-flow)
+9. [What is a Sandbox?](#9-what-is-a-sandbox)
+10. [System Prompt & Tools](#10-system-prompt--tools)
+11. [Build Order (7 Steps)](#11-build-order-7-steps)
+12. [Security Checklist](#12-security-checklist)
+13. [Glossary](#13-glossary)
+
+---
+
+## 1. Overview
+
+A **Lovable.dev clone** is an AI-powered web app builder. The user types a prompt in chat → an LLM generates/edits real code → the code runs in an isolated cloud sandbox → a live preview iframe shows the result instantly.
+
+**Three core surfaces:**
+- **Chat panel** (left) — conversation with the AI
+- **Code/file tree** (center, optional) — Monaco editor showing generated files
+- **Live preview** (right) — iframe pointing at the sandbox's dev server URL
+
+---
+
+## 2. Core Capabilities
+
+| Capability | What it does |
+|---|---|
+| Chat UI | Streams AI replies token-by-token |
+| AI Loop | LLM plans → calls tools (write file, run command) → observes → repeats |
+| Sandbox | Isolated VM/container that holds the generated project |
+| Live Preview | iframe that loads the sandbox's Vite/Next dev server |
+| File Tree | Browse + edit any generated file |
+| Persistence | Save projects, messages, files to a database |
+| Auth | Sign up / log in / project ownership |
+| Versioning (optional) | Snapshot the project after each AI turn |
+
+---
+
+## 3. Recommended Tech Stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Framework | **TanStack Start** (or Next.js 15) | SSR + server functions |
+| Styling | Tailwind CSS + shadcn/ui | Fast, themable |
+| LLM | **Anthropic Claude Sonnet 4** (or GPT-4o) | Best at tool use + code |
+| Streaming | Server-Sent Events (SSE) | Token-by-token chat |
+| Sandbox | **E2B** / Daytona / self-hosted Docker | Safe code execution |
+| Editor | **Monaco** (`@monaco-editor/react`) | Same engine as VS Code |
+| Panels | `react-resizable-panels` | Draggable 3-panel layout |
+| Backend | **Lovable Cloud** (Supabase under the hood) | DB + Auth + Storage |
+| File diffs (optional) | `diff-match-patch` | Show AI changes |
+
+---
+
+## 4. High-Level System Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                       BROWSER                            │
+│  ┌──────────┬─────────────┬─────────────────────────┐    │
+│  │  Chat    │  Code Tree  │   Preview iframe        │    │
+│  │  Panel   │  + Monaco   │   (src = sandbox URL)   │    │
+│  └────┬─────┴──────┬──────┴───────────┬─────────────┘    │
+└───────┼────────────┼──────────────────┼──────────────────┘
+        │ SSE        │ load file        │ http
+        ▼            ▼                  ▼
+┌──────────────────────────────┐  ┌─────────────────────┐
+│   YOUR SERVER (TanStack)     │  │  SANDBOX (E2B VM)   │
+│  • stream.functions.ts       │──▶ • generated project │
+│  • run-tool.functions.ts     │   │ • runs `vite dev`  │
+│  • saves to DB               │   │ • exposes URL      │
+└──────────────┬───────────────┘  └─────────────────────┘
+               │
+               ▼
+        ┌─────────────┐
+        │  DATABASE   │  projects, messages, project_files
+        └─────────────┘
+```
+
+---
+
+## 5. Folder & File Structure
+
+```
+lovable-clone/
+├── src/
+│   ├── routes/
+│   │   ├── __root.tsx                    # App shell (providers, <Outlet/>)
+│   │   ├── index.tsx                     # Landing page
+│   │   ├── login.tsx                     # Auth
+│   │   ├── _authenticated.tsx            # Auth-guard layout
+│   │   ├── _authenticated.dashboard.tsx  # Project list
+│   │   └── _authenticated.builder.$projectId.tsx  # 3-panel builder
+│   │
+│   ├── components/
+│   │   ├── builder/
+│   │   │   ├── ChatPanel.tsx             # Left: chat messages + input
+│   │   │   ├── MessageList.tsx           # Renders streamed messages
+│   │   │   ├── PromptInput.tsx           # Textarea + send button
+│   │   │   ├── FileTree.tsx              # Center: file explorer
+│   │   │   ├── CodeEditor.tsx            # Monaco wrapper
+│   │   │   ├── PreviewPane.tsx           # Right: iframe + refresh
+│   │   │   └── BuilderShell.tsx          # 3-panel resizable layout
+│   │   ├── dashboard/
+│   │   │   └── ProjectCard.tsx
+│   │   └── ui/                           # shadcn components
+│   │
+│   ├── lib/
+│   │   ├── ai/
+│   │   │   ├── system-prompt.ts          # The big system prompt
+│   │   │   ├── tools.ts                  # Tool schemas (write_file, run_cmd)
+│   │   │   ├── stream.functions.ts       # createServerFn → calls LLM, streams
+│   │   │   └── run-tool.functions.ts     # Executes a tool call in sandbox
+│   │   ├── sandbox/
+│   │   │   ├── e2b.server.ts             # E2B client wrapper
+│   │   │   ├── create-sandbox.functions.ts
+│   │   │   ├── apply-file.functions.ts   # Write file inside sandbox
+│   │   │   └── run-command.functions.ts  # Run shell cmd inside sandbox
+│   │   ├── projects/
+│   │   │   ├── create-project.functions.ts
+│   │   │   ├── list-projects.functions.ts
+│   │   │   └── get-project.functions.ts
+│   │   └── utils.ts
+│   │
+│   ├── integrations/
+│   │   └── supabase/
+│   │       ├── client.ts                 # Browser client
+│   │       ├── client.server.ts          # Admin client (service role)
+│   │       └── auth-middleware.ts        # requireSupabaseAuth
+│   │
+│   ├── hooks/
+│   │   ├── use-chat.ts                   # Manages chat state + SSE
+│   │   ├── use-project-files.ts          # Loads files from DB
+│   │   └── use-sandbox.ts                # Boots sandbox on mount
+│   │
+│   ├── styles.css                        # Tailwind + design tokens
+│   ├── router.tsx
+│   ├── start.ts
+│   └── server.ts
+│
+├── supabase/
+│   └── migrations/
+│       └── 0001_init.sql                 # projects, messages, project_files
+│
+├── package.json
+├── vite.config.ts
+└── tsconfig.json
+```
+
+---
+
+## 6. File-by-File Responsibilities
+
+### Routes (`src/routes/`)
+| File | Purpose |
+|---|---|
+| `__root.tsx` | Root layout. Mounts providers (QueryClient, Auth), renders `<Outlet/>`. |
+| `index.tsx` | Public landing page — hero + "Start building" CTA. |
+| `login.tsx` | Email/password or OAuth login. |
+| `_authenticated.tsx` | Pathless layout. Redirects to `/login` if no session. |
+| `_authenticated.dashboard.tsx` | Lists user's projects + "New project" button. |
+| `_authenticated.builder.$projectId.tsx` | The main 3-panel builder. Loads project + boots sandbox. |
+
+### Builder Components (`src/components/builder/`)
+| File | Purpose |
+|---|---|
+| `BuilderShell.tsx` | Resizable 3-panel layout (chat / code / preview). |
+| `ChatPanel.tsx` | Container for messages + prompt input. |
+| `MessageList.tsx` | Renders user + assistant messages with markdown + tool calls. |
+| `PromptInput.tsx` | Auto-grow textarea, Enter to send, Shift+Enter newline. |
+| `FileTree.tsx` | Recursive tree of files in the sandbox. |
+| `CodeEditor.tsx` | Monaco editor; read-only or editable. |
+| `PreviewPane.tsx` | iframe with refresh + open-in-new-tab. |
+
+### AI Logic (`src/lib/ai/`)
+| File | Purpose |
+|---|---|
+| `system-prompt.ts` | The master instructions sent to the LLM every turn. |
+| `tools.ts` | JSON schemas for tools: `write_file`, `read_file`, `run_command`, `list_files`. |
+| `stream.functions.ts` | Server fn: takes message history + project, calls LLM with streaming, yields tokens + tool calls. |
+| `run-tool.functions.ts` | Server fn: executes one tool call against the sandbox and returns the result. |
+
+### Sandbox Logic (`src/lib/sandbox/`)
+| File | Purpose |
+|---|---|
+| `e2b.server.ts` | Wraps the E2B SDK. Server-only. |
+| `create-sandbox.functions.ts` | Spawns a sandbox, installs deps, returns `sandboxId` + `previewUrl`. |
+| `apply-file.functions.ts` | Writes file content into the sandbox FS. |
+| `run-command.functions.ts` | Runs `npm install`, `bun add x`, etc. Returns stdout/stderr. |
+
+### Project + Persistence (`src/lib/projects/`)
+| File | Purpose |
+|---|---|
+| `create-project.functions.ts` | Inserts a new project row + creates sandbox. |
+| `list-projects.functions.ts` | Returns user's projects. |
+| `get-project.functions.ts` | Loads one project + its files + message history. |
+
+### Integrations (`src/integrations/supabase/`)
+| File | Purpose |
+|---|---|
+| `client.ts` | Browser supabase client (RLS applies). |
+| `client.server.ts` | Admin client (service role, bypasses RLS). Server only. |
+| `auth-middleware.ts` | `requireSupabaseAuth` middleware for server functions. |
+
+### Hooks (`src/hooks/`)
+| File | Purpose |
+|---|---|
+| `use-chat.ts` | Manages chat state, opens SSE, appends streamed tokens. |
+| `use-project-files.ts` | Loads file list + content from DB/sandbox. |
+| `use-sandbox.ts` | Boots or attaches to the sandbox on mount. |
+
+---
+
+## 7. Database Schema
+
+```sql
+-- projects
+create table public.projects (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null,
+  sandbox_id text,
+  preview_url text,
+  created_at timestamptz default now()
+);
+
+-- messages
+create table public.messages (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects(id) on delete cascade,
+  role text not null check (role in ('user','assistant','tool')),
+  content jsonb not null,
+  created_at timestamptz default now()
+);
+
+-- project_files (mirror of sandbox FS)
+create table public.project_files (
+  project_id uuid not null references public.projects(id) on delete cascade,
+  path text not null,
+  content text not null,
+  updated_at timestamptz default now(),
+  primary key (project_id, path)
+);
+
+-- Grants + RLS
+grant select, insert, update, delete on public.projects to authenticated;
+grant select, insert, update, delete on public.messages to authenticated;
+grant select, insert, update, delete on public.project_files to authenticated;
+grant all on public.projects, public.messages, public.project_files to service_role;
+
+alter table public.projects enable row level security;
+alter table public.messages enable row level security;
+alter table public.project_files enable row level security;
+
+create policy "own projects" on public.projects
+  for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+create policy "own messages" on public.messages
+  for all to authenticated
+  using (exists (select 1 from public.projects p where p.id = project_id and p.user_id = auth.uid()));
+
+create policy "own files" on public.project_files
+  for all to authenticated
+  using (exists (select 1 from public.projects p where p.id = project_id and p.user_id = auth.uid()));
+```
+
+---
+
+## 8. The AI Loop (End-to-End Flow)
+
+```
+1. User types prompt in ChatPanel
+        │
+        ▼
+2. use-chat.ts → POST to stream.functions.ts (SSE)
+        │
+        ▼
+3. Server loads: message history + system prompt + tool schemas
+        │
+        ▼
+4. Calls LLM (Claude/GPT) with stream=true
+        │
+        ├── streams text tokens → back to browser
+        └── emits tool_use blocks (e.g. write_file)
+        │
+        ▼
+5. For each tool_use: run-tool.functions.ts executes it in the sandbox
+   • write_file → apply-file.functions.ts
+   • run_command → run-command.functions.ts
+        │
+        ▼
+6. Tool result is appended to the conversation and sent back to the LLM
+        │
+        ▼
+7. Loop until LLM emits no more tool_use (final answer reached)
+        │
+        ▼
+8. Sandbox dev server hot-reloads → PreviewPane iframe updates
+        │
+        ▼
+9. Messages + file changes saved to DB
+```
+
+---
+
+## 9. What is a Sandbox?
+
+An **isolated, temporary cloud computer** where AI-generated code runs safely.
+
+- Each project gets its own sandbox (a small VM or container).
+- The AI writes files into it and runs commands like `bun install` or `vite dev`.
+- The sandbox exposes a public preview URL → loaded into the iframe.
+- It's destroyed (or paused) when the user closes the project.
+
+**Why isolation matters:** broken or malicious AI code can't touch your main app, your database, or other users' projects.
+
+**Providers:** [E2B](https://e2b.dev) (easiest), [Daytona](https://daytona.io), or self-hosted Docker.
+
+---
+
+## 10. System Prompt & Tools
+
+### System prompt should include:
+- Role (you are a senior full-stack engineer building inside a sandbox)
+- Available tools and when to use each
+- Project conventions (React + Vite + Tailwind, etc.)
+- Output format (concise, no fluff)
+- Constraints (don't delete user code without asking, etc.)
+
+### Tool schemas (example):
+```ts
+{
+  name: "write_file",
+  description: "Create or overwrite a file in the sandbox.",
+  input_schema: {
+    type: "object",
+    properties: {
+      path: { type: "string" },
+      content: { type: "string" }
+    },
+    required: ["path", "content"]
+  }
+}
+```
+Also: `read_file`, `list_files`, `run_command`, `delete_file`.
+
+---
+
+## 11. Build Order (7 Steps)
+
+| # | Step | What you build |
+|---|---|---|
+| 1 | **Shell & Auth** | TanStack Start scaffold, Lovable Cloud, login/signup |
+| 2 | **Dashboard** | Project list, create/delete project |
+| 3 | **Mock 3-panel Builder** | Layout + chat UI + Monaco + iframe with fake data |
+| 4 | **Sandbox** | Wire E2B, boot sandbox per project, get preview URL |
+| 5 | **AI Loop** | System prompt + tools + streaming + tool execution |
+| 6 | **Persistence** | Save messages + files to DB; reload on revisit |
+| 7 | **Polish** | Versioning, share links, error handling, rate limits |
+
+Ship step 1–3 first to get a clickable demo; steps 4–5 are where the magic happens.
+
+---
+
+## 12. Security Checklist
+
+- [ ] Every server function checks auth via `requireSupabaseAuth`.
+- [ ] RLS enabled on `projects`, `messages`, `project_files`.
+- [ ] Service-role key NEVER imported into client code.
+- [ ] Sandbox commands cannot escape the sandbox (use a real provider, not `child_process` on your server).
+- [ ] Rate-limit LLM calls per user.
+- [ ] Validate tool inputs (path traversal: reject `../`, absolute paths outside project root).
+- [ ] Cap sandbox lifetime + disk usage.
+
+---
+
+## 13. Glossary
+
+| Term | Meaning |
+|---|---|
+| **Sandbox** | Isolated cloud VM where AI code runs. |
+| **Tool use** | LLM emits a structured call (e.g. `write_file`) instead of plain text. |
+| **SSE** | Server-Sent Events — one-way stream from server to browser. |
+| **RLS** | Row-Level Security — DB enforces per-user access rules. |
+| **Server function** | TanStack RPC: typed function callable from client, runs on server. |
+| **Hot reload** | Dev server re-renders the app when files change, without full refresh. |
+
+---
+
+*End of document — use this as the single source of truth while building your Lovable clone.*
+# 14. Functional Requirements
+
+## 14.1 User Authentication
+
+* User Registration
+* User Login
+* User Logout
+* Forgot Password
+* Password Reset
+* OAuth Authentication (Google/GitHub)
+
+## 14.2 Project Management
+
+* Create New Project
+* Rename Project
+* Delete Project
+* Duplicate Project
+* View Project History
+
+## 14.3 AI Builder
+
+* Generate Application from Prompt
+* Modify Existing Code
+* Read Existing Files
+* Create New Files
+* Delete Files
+* Execute Commands
+* Stream Responses
+
+## 14.4 File Management
+
+* File Explorer
+* File Search
+* File Editing
+* File Synchronization
+* File Version Tracking
+
+## 14.5 Preview System
+
+* Live Preview
+* Auto Refresh
+* Open in New Tab
+* Error Overlay
+
+---
+
+# 15. Non-Functional Requirements
+
+## Performance
+
+* Chat response latency under 3 seconds.
+* Preview load time under 5 seconds.
+* File save operations under 500ms.
+
+## Scalability
+
+* Support 10,000+ projects.
+* Horizontal scaling of application servers.
+* Multiple sandbox instances.
+
+## Reliability
+
+* 99.9% service uptime.
+* Automatic recovery from failures.
+* Persistent project storage.
+
+## Maintainability
+
+* Modular code structure.
+* Type-safe APIs.
+* Centralized logging.
+
+## Security
+
+* Authentication required.
+* Authorization enforced through RLS.
+* Isolated sandbox execution.
+
+---
+
+# 16. User Flow
+
+```text
+User
+ │
+ ▼
+Login / Signup
+ │
+ ▼
+Dashboard
+ │
+ ▼
+Create Project
+ │
+ ▼
+Builder Page
+ │
+ ▼
+Enter Prompt
+ │
+ ▼
+AI Generates Code
+ │
+ ▼
+Sandbox Executes Code
+ │
+ ▼
+Live Preview Updates
+ │
+ ▼
+Project Saved
+```
+
+---
+
+# 17. Sequence Diagram
+
+```text
+User
+ │
+ │ Prompt
+ ▼
+Frontend
+ │
+ │ API Request
+ ▼
+Backend Server
+ │
+ │ LLM Request
+ ▼
+Claude / GPT
+ │
+ │ Tool Call
+ ▼
+Sandbox
+ │
+ │ Execution Result
+ ▼
+Backend Server
+ │
+ │ SSE Stream
+ ▼
+Frontend
+ │
+ │ Render
+ ▼
+User
+```
+
+---
+
+# 18. REST API Design
+
+## Authentication
+
+POST /api/auth/signup
+
+POST /api/auth/login
+
+POST /api/auth/logout
+
+POST /api/auth/reset-password
+
+## Projects
+
+GET /api/projects
+
+POST /api/projects
+
+GET /api/projects/:id
+
+DELETE /api/projects/:id
+
+PATCH /api/projects/:id
+
+## Chat
+
+POST /api/chat/stream
+
+## Sandbox
+
+POST /api/sandbox/create
+
+POST /api/sandbox/restart
+
+DELETE /api/sandbox/destroy
+
+## Files
+
+GET /api/files
+
+POST /api/files/write
+
+DELETE /api/files
+
+---
+
+# 19. Deployment Architecture
+
+```text
+Users
+ │
+ ▼
+Cloudflare CDN
+ │
+ ▼
+Vercel
+ │
+ ▼
+TanStack Application
+ │
+ ├── Claude API
+ │
+ ├── Supabase
+ │
+ └── E2B Sandbox
+```
+
+---
+
+# 20. Error Handling Strategy
+
+## AI Failure
+
+* Retry request.
+* Display user-friendly error.
+
+## Sandbox Failure
+
+* Restart sandbox automatically.
+* Notify user.
+
+## Network Failure
+
+* Retry SSE connection.
+* Reconnect automatically.
+
+## Database Failure
+
+* Retry operation.
+* Log failure event.
+
+## File Write Failure
+
+* Rollback changes.
+* Display error notification.
+
+---
+
+# 21. Monitoring & Logging
+
+## Application Logs
+
+* User actions
+* Authentication events
+* Project creation
+* AI requests
+
+## Sandbox Logs
+
+* Command execution
+* Runtime errors
+* Resource usage
+
+## Metrics
+
+* Response latency
+* Token usage
+* Sandbox startup time
+* Active users
+
+## Alerts
+
+* Sandbox crash
+* API failure
+* High latency
+* Excessive token usage
+
+---
+
+# 22. Cost Estimation
+
+| Component   | Estimated Monthly Cost |
+| ----------- | ---------------------- |
+| Claude API  | $50 - $300             |
+| E2B Sandbox | $20 - $200             |
+| Supabase    | $25 - $100             |
+| Vercel      | $20 - $100             |
+| Monitoring  | $10 - $50              |
+
+Estimated Total:
+$100 - $750 per month
+
+---
+
+# 23. Future Enhancements
+
+## Collaboration
+
+* Real-time multiplayer editing
+* Team workspaces
+* Comments and mentions
+
+## AI Improvements
+
+* Multi-agent architecture
+* Autonomous planning
+* AI code review
+
+## Integrations
+
+* GitHub Sync
+* GitLab Sync
+* Bitbucket Support
+
+## Deployment
+
+* One-click production deploy
+* Custom domains
+* Docker export
+
+## Advanced Features
+
+* Snapshot history
+* Rollback support
+* Visual drag-and-drop builder
+* AI-generated database schemas
+
+---
+
+# 24. Production Folder Structure
+
+```text
+src/
+├── analytics/
+├── billing/
+├── github/
+├── monitoring/
+├── versioning/
+├── ai/
+├── sandbox/
+├── projects/
+├── auth/
+├── api/
+├── hooks/
+├── components/
+├── routes/
+├── store/
+├── styles/
+└── utils/
+```
+
+---
+# 25. RAG (Retrieval Augmented Generation)
+
+## Purpose
+
+Allows AI to remember:
+
+- Previous chats
+- Generated files
+- Project structure
+- User instructions
+
+## Flow
+
+User Prompt
+    ↓
+Embedding Generation
+    ↓
+Vector Database Search
+    ↓
+Relevant Context Retrieved
+    ↓
+Context Added To Prompt
+    ↓
+LLM Generates Response
+
+## Benefits
+
+- Long-term memory
+- Better code modifications
+- Reduced hallucinations
+- Context-aware generation
+ 
+ # 26. Vector Database
+
+## Recommended Options
+
+- Qdrant
+- Pinecone
+- Weaviate
+
+## Stored Data
+
+- Chat embeddings
+- File embeddings
+- Documentation embeddings
+
+## Example
+
+User:
+"Add dark mode"
+
+System retrieves:
+
+- Previous generated UI
+- Existing Tailwind config
+- Theme files
+
+Then sends context to AI.
+
+# 27. Real-Time Communication
+
+## Technologies
+
+- SSE (MVP)
+- WebSocket (Production)
+
+## Usage
+
+- AI response streaming
+- Preview status updates
+- Sandbox logs
+- Build status
+
+## Flow
+
+Backend
+   ↓
+WebSocket Server
+   ↓
+Frontend
+
+Benefits:
+- Bi-directional communication
+- Low latency
+- Real-time updates
+
+# 28. Kubernetes Architecture
+
+## Purpose
+
+Manage thousands of running sandboxes.
+
+## Components
+
+- Kubernetes Cluster
+- Pods
+- Containers
+- Ingress Controller
+- Persistent Volumes
+
+## Flow
+
+User Project
+     ↓
+Kubernetes
+     ↓
+Creates Pod
+     ↓
+Runs Generated App
+     ↓
+Provides Preview URL
+
+Benefits
+
+- Auto scaling
+- Self healing
+- Isolation
+
+# 29. Event Driven Architecture
+
+## Event Broker
+
+Apache Kafka
+
+## Events
+
+- Project Created
+- AI Request Completed
+- Credits Deducted
+- Sandbox Started
+- Sandbox Stopped
+
+## Benefits
+
+- Decoupled services
+- High scalability
+- Reliability
+
+# 30. Commerce Service
+
+## Responsibilities
+
+- Credit Tracking
+- Subscription Plans
+- Billing
+- Usage Analytics
+
+## Plans
+
+Free
+Pro
+Enterprise
+
+## Example
+
+Generate App
+      ↓
+Consume Credits
+      ↓
+Update User Balance
+
+# 31. Rate Limiting
+
+## Technology
+
+Redis
+
+## Rules
+
+Free User:
+20 prompts/hour
+
+Pro User:
+500 prompts/hour
+
+## Benefits
+
+- Prevent abuse
+- Reduce API costs
+- Improve stability
+
+# 32. Versioning System
+
+## Features
+
+- Snapshot after every AI action
+- Rollback
+- Diff comparison
+- Restore previous version
+
+## Flow
+
+AI Changes Files
+       ↓
+Create Snapshot
+       ↓
+Store Version
+
+# 33. Capacity Planning
+
+Target Users:
+10 Million
+
+DAU:
+1 Million
+
+Concurrent Generations:
+10,000
+
+Concurrent Sandboxes:
+1,000
+
+Storage:
+50TB+
+
+Database:
+PostgreSQL Cluster
+
+Cache:
+Redis Cluster
+
+Message Queue:
+Kafka Cluster
+
+# 34. Conclusion
+
+This architecture provides a scalable, secure, AI-native platform capable of generating and modifying full-stack web applications through natural language prompts. The system combines large language models, isolated execution sandboxes, real-time streaming, persistent project storage, and live previews to deliver a Lovable.dev-like developer experience.
+
+The architecture is designed to support future growth through modular services, scalable infrastructure, strong security practices, and extensible AI tooling.
+
