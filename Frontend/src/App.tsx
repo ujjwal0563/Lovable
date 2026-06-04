@@ -4,8 +4,31 @@ import viteLogo from './assets/vite.svg'
 import heroImg from './assets/hero.png'
 import './App.css'
 
+// 1. YOUR GO BACKEND URL IS SET HERE
+const API_URL = "http://localhost:8080";
+
 function App() {
   const [count, setCount] = useState(0)
+  const [backendMessage, setBackendMessage] = useState("")
+
+  // 2. FUNCTION TO CALL YOUR GO SERVER
+  const handleButtonClick = async () => {
+    // Keep increasing the UI counter
+    setCount((prev) => prev + 1);
+
+    try {
+      // Fetching data from your running Go backend server
+      const response = await fetch(`${API_URL}/`);
+      const text = await response.text();
+      
+      // Save the message from Go into state
+      setBackendMessage(text);
+      console.log("Response from Go:", text);
+    } catch (error) {
+      console.error("Error communicating with Go backend:", error);
+      setBackendMessage("Failed to reach Go server");
+    }
+  };
 
   return (
     <>
@@ -20,11 +43,20 @@ function App() {
           <p>
             Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
           </p>
+          
+          {/* 3. DISPLAY BACKEND STATUS TEXT */}
+          {backendMessage && (
+            <p style={{ color: '#646cff', fontWeight: 'bold', marginTop: '10px' }}>
+              Backend says: {backendMessage}
+            </p>
+          )}
         </div>
+        
+        {/* 4. UPDATED CLICK HANDLER TO RUN THE FUNCTION */}
         <button
           type="button"
           className="counter"
-          onClick={() => setCount((count) => count + 1)}
+          onClick={handleButtonClick}
         >
           Count is {count}
         </button>
@@ -118,5 +150,3 @@ function App() {
     </>
   )
 }
-
-export default App
