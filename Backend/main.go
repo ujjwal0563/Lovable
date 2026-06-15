@@ -122,6 +122,8 @@ func main() {
 		// Sandbox (E2B)
 		r.Post("/api/projects/{id}/sandbox", sandboxH.Create)
 		r.Delete("/api/projects/{id}/sandbox", sandboxH.Destroy)
+		r.Post("/api/projects/{id}/sandbox/sync", sandboxH.Sync)
+		r.Get("/api/projects/{id}/sandbox/status", sandboxH.Status)
 
 		// Files
 		r.Get("/api/projects/{projectId}/files", filesH.List)
