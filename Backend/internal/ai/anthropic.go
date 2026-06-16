@@ -103,7 +103,7 @@ type Message struct {
 	Content any    `json:"content"` // string or []ContentBlock
 }
 
-// ContentBlock is one block inside a message (text, tool_use, or tool_result).
+// ContentBlock is one block inside a message (text, tool_use, image, or tool_result).
 type ContentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
@@ -112,6 +112,17 @@ type ContentBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   string          `json:"content,omitempty"`
+	// Image fields
+	MediaType string       `json:"media_type,omitempty"`
+	Data      string       `json:"data,omitempty"`
+	Source    *ImageSource `json:"source,omitempty"`
+}
+
+// ImageSource is used for Claude vision API
+type ImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // "image/png"
+	Data      string `json:"data"`       // base64 string
 }
 
 // StreamEvent is the SSE payload sent to the browser.
@@ -138,6 +149,7 @@ func NewClient(apiKey string) *Client {
 // StreamRequest is the input to the agentic loop.
 type StreamRequest struct {
 	Messages []Message
+	Images   []string // base64 data URLs to attach to the first user message
 	OnToken  func(text string)
 	OnTool   func(id, name string, input json.RawMessage) (string, error)
 	OnDone   func(finalMessages []Message)
@@ -147,6 +159,41 @@ type StreamRequest struct {
 func (c *Client) Stream(ctx context.Context, req StreamRequest) error {
 	messages := make([]Message, len(req.Messages))
 	copy(messages, req.Messages)
+
+	// If images provided, attach them to the last user message as vision blocks
+	if len(req.Images) > 0 && len(messages) > 0 {
+		last := &messages[len(messages)-1]
+		if last.Role == "user" {
+			// Build multi-part content: text + images
+			var blocks []ContentBlock
+			// Text block
+			if text, ok := last.Content.(string); ok && text != "" {
+				blocks = append(blocks, ContentBlock{Type: "text", Text: text})
+			}
+			// Image blocks
+			for _, dataURL := range req.Images {
+				// Parse data:image/png;base64,xxxxx
+				if !strings.HasPrefix(dataURL, "data:") {
+					continue
+				}
+				parts := strings.SplitN(dataURL, ",", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				meta := strings.TrimPrefix(parts[0], "data:")
+				meta = strings.TrimSuffix(meta, ";base64")
+				blocks = append(blocks, ContentBlock{
+					Type: "image",
+					Source: &ImageSource{
+						Type:      "base64",
+						MediaType: meta,
+						Data:      parts[1],
+					},
+				})
+			}
+			last.Content = blocks
+		}
+	}
 
 	for {
 		resp, err := c.callAPI(ctx, messages)
