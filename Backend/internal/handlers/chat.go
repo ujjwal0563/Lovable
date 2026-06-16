@@ -24,7 +24,8 @@ func NewChatHandler(db *pgxpool.Pool, aiClient *ai.Client) *ChatHandler {
 }
 
 type chatRequest struct {
-	Message string `json:"message"`
+	Message  string   `json:"message"`
+	ImageIDs []string `json:"image_ids"` // optional — images to send to Claude
 }
 
 // Stream handles POST /api/projects/:projectId/chat/stream — SSE endpoint.
@@ -45,6 +46,19 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
 		writeError(w, "message is required", http.StatusBadRequest)
 		return
+	}
+
+	// Load images if provided
+	var imageDataURLs []string
+	for _, imgID := range req.ImageIDs {
+		var dataURL string
+		err := h.db.QueryRow(r.Context(),
+			`SELECT data_url FROM project_images WHERE id = $1 AND project_id = $2`,
+			imgID, projectID,
+		).Scan(&dataURL)
+		if err == nil {
+			imageDataURLs = append(imageDataURLs, dataURL)
+		}
 	}
 
 	// Persist user message
@@ -112,6 +126,7 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.aiClient.Stream(ctx, ai.StreamRequest{
 		Messages: history,
+		Images:   imageDataURLs,
 		OnToken: func(text string) {
 			assistantText.WriteString(text)
 			sendEvent(ai.StreamEvent{Type: "token", Content: text})
