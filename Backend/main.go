@@ -62,6 +62,15 @@ func main() {
 	dupH := handlers.NewDuplicateHandler(pool)
 	exportH := handlers.NewExportHandler(pool)
 	sandboxH := handlers.NewSandboxHandler(pool, cfg.E2BApiKey)
+	uploadH := handlers.NewUploadHandler(pool)
+	templatesH := handlers.NewTemplatesHandler(pool)
+	usageH := handlers.NewUsageHandler(pool)
+	searchH := handlers.NewSearchHandler(pool)
+	shareH := handlers.NewShareHandler(pool)
+	profileH := handlers.NewProfileHandler(pool)
+	notifH := handlers.NewNotificationsHandler(pool, mailer)
+	teamH := handlers.NewTeamHandler(pool, mailer, cfg.FrontendOrigin)
+	realtimeH := handlers.NewRealtimeHandler(pool)
 
 	// ── Rate limiters ─────────────────────────────────────
 	chatLimiter := authmw.NewRateLimiter(20)
@@ -141,7 +150,53 @@ func main() {
 			r.Post("/api/projects/{projectId}/chat/stream", chatH.Stream)
 		})
 		r.Get("/api/projects/{projectId}/messages", chatH.GetMessages)
+
+		// Image upload
+		r.Post("/api/projects/{projectId}/upload", uploadH.Upload)
+		r.Get("/api/projects/{projectId}/images", uploadH.ListImages)
+		r.Delete("/api/projects/{projectId}/images/{imageId}", uploadH.DeleteImage)
+
+		// Templates
+		r.Get("/api/templates", templatesH.List)
+		r.Post("/api/templates/{templateId}/use", templatesH.CreateFromTemplate)
+
+		// Search
+		r.Get("/api/search", searchH.Search)
+
+		// Usage
+		r.Get("/api/usage", usageH.GetUsage)
+		r.Get("/api/projects/{id}/usage", usageH.GetProjectUsage)
+
+		// Public sharing
+		r.Post("/api/projects/{id}/share", shareH.Enable)
+		r.Delete("/api/projects/{id}/share", shareH.Disable)
+
+		// Profile
+		r.Patch("/api/auth/profile", profileH.UpdateProfile)
+		r.Post("/api/auth/change-password", profileH.ChangePassword)
+		r.Delete("/api/auth/account", profileH.DeleteAccount)
+
+		// Email notification preferences
+		r.Get("/api/notifications/preferences", notifH.GetPreferences)
+		r.Patch("/api/notifications/preferences", notifH.UpdatePreferences)
+		r.Post("/api/notifications/test", notifH.SendTestEmail)
+
+		// Team collaboration
+		r.Get("/api/projects/{id}/members", teamH.ListMembers)
+		r.Post("/api/projects/{id}/members/invite", teamH.InviteMember)
+		r.Patch("/api/projects/{id}/members/{userId}", teamH.UpdateMemberRole)
+		r.Delete("/api/projects/{id}/members/{userId}", teamH.RemoveMember)
+		r.Post("/api/projects/{id}/leave", teamH.LeaveProject)
+		r.Post("/api/invites/{token}/accept", teamH.AcceptInvite)
+
+		// Real-time cursors (SSE)
+		r.Get("/api/projects/{id}/realtime", realtimeH.Connect)
+		r.Post("/api/projects/{id}/realtime/emit", realtimeH.Emit)
+		r.Get("/api/projects/{id}/realtime/online", realtimeH.GetOnlineUsers)
 	})
+
+	// ── Public routes (no auth) ────────────────────────────
+	r.Get("/api/share/{token}", shareH.GetShared)
 
 	fmt.Printf("🚀 Server running on http://localhost:%s\n", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
