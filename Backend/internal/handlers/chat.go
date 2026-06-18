@@ -15,12 +15,13 @@ import (
 )
 
 type ChatHandler struct {
-	db       *pgxpool.Pool
-	aiClient *ai.Client
+	db         *pgxpool.Pool
+	aiClient   *ai.Client
+	groqClient *ai.GroqClient
 }
 
-func NewChatHandler(db *pgxpool.Pool, aiClient *ai.Client) *ChatHandler {
-	return &ChatHandler{db: db, aiClient: aiClient}
+func NewChatHandler(db *pgxpool.Pool, aiClient *ai.Client, groqClient *ai.GroqClient) *ChatHandler {
+	return &ChatHandler{db: db, aiClient: aiClient, groqClient: groqClient}
 }
 
 type chatRequest struct {
@@ -123,6 +124,52 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	var assistantText strings.Builder
+
+	// Use Groq if available, otherwise Anthropic
+	if h.groqClient != nil {
+		if err := h.groqClient.Stream(ctx, ai.StreamRequest{
+			Messages: history,
+			Images:   imageDataURLs,
+			OnToken: func(text string) {
+				assistantText.WriteString(text)
+				sendEvent(ai.StreamEvent{Type: "token", Content: text})
+			},
+			OnTool: func(id, name string, input json.RawMessage) (string, error) {
+				sendEvent(ai.StreamEvent{Type: "tool_start", ToolID: id, ToolName: name, Input: input})
+				result, err := h.executeTool(ctx, projectID, name, input)
+				if err != nil {
+					sendEvent(ai.StreamEvent{Type: "tool_error", ToolID: id, Error: err.Error()})
+					return "", err
+				}
+				sendEvent(ai.StreamEvent{Type: "tool_done", ToolID: id, ToolName: name, Result: result})
+				return result, nil
+			},
+			OnDone: func(_ []ai.Message) {
+				// Save assistant reply to DB — always save something
+				text := assistantText.String()
+				if text == "" {
+					text = "Done! Files updated."
+				}
+				content, _ := json.Marshal(map[string]string{"text": text})
+				if _, err := h.db.Exec(ctx,
+					`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
+					projectID, content,
+				); err != nil {
+					// log but don't fail
+					_ = err
+				}
+				sendEvent(ai.StreamEvent{Type: "done"})
+			},
+		}); err != nil {
+			sendEvent(ai.StreamEvent{Type: "error", Error: err.Error()})
+		}
+		return
+	}
+
+	if h.aiClient == nil {
+		sendEvent(ai.StreamEvent{Type: "error", Error: "no AI provider configured — set GROQ_API_KEY or ANTHROPIC_API_KEY in .env"})
+		return
+	}
 
 	if err := h.aiClient.Stream(ctx, ai.StreamRequest{
 		Messages: history,
