@@ -83,7 +83,6 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "failed to load history", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
 
 	var history []ai.Message
 	for rows.Next() {
@@ -103,6 +102,7 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	rows.Close() // close explicitly before SSE starts
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -145,19 +145,19 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 				return result, nil
 			},
 			OnDone: func(_ []ai.Message) {
-				// Save assistant reply to DB — always save something
+				// Save both user and assistant messages using background goroutine
+				// so SSE connection is not blocked
 				text := assistantText.String()
 				if text == "" {
 					text = "Done! Files updated."
 				}
-				content, _ := json.Marshal(map[string]string{"text": text})
-				if _, err := h.db.Exec(ctx,
-					`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
-					projectID, content,
-				); err != nil {
-					// log but don't fail
-					_ = err
-				}
+				go func() {
+					content, _ := json.Marshal(map[string]string{"text": text})
+					h.db.Exec(context.Background(),
+						`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
+						projectID, content,
+					)
+				}()
 				sendEvent(ai.StreamEvent{Type: "done"})
 			},
 		}); err != nil {
@@ -209,11 +209,16 @@ func (h *ChatHandler) GetMessages(w http.ResponseWriter, r *http.Request) {
 	userID := authmw.GetUserID(r)
 	projectID := chi.URLParam(r, "projectId")
 
+	// Check project ownership
 	var ownerID string
 	if err := h.db.QueryRow(r.Context(),
 		`SELECT user_id FROM projects WHERE id = $1`, projectID,
-	).Scan(&ownerID); err != nil || ownerID != userID {
-		writeError(w, "project not found", http.StatusNotFound)
+	).Scan(&ownerID); err != nil {
+		writeError(w, "project not found - invalid projectId", http.StatusNotFound)
+		return
+	}
+	if ownerID != userID {
+		writeError(w, "project not found - wrong user", http.StatusNotFound)
 		return
 	}
 
@@ -224,7 +229,7 @@ func (h *ChatHandler) GetMessages(w http.ResponseWriter, r *http.Request) {
 		projectID,
 	)
 	if err != nil {
-		writeError(w, "failed to load messages", http.StatusInternalServerError)
+		writeError(w, "failed to load messages: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
