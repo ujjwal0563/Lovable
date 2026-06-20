@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -38,11 +39,17 @@ func main() {
 	}
 
 	// ── AI client ─────────────────────────────────────────
-	aiClient := ai.NewClient(cfg.AnthropicKey)
-	if cfg.AnthropicKey == "" {
-		log.Println("⚠  ANTHROPIC_API_KEY not set")
-	} else {
+	var aiClient *ai.Client
+	var groqClient *ai.GroqClient
+
+	if cfg.AIProvider == "groq" && cfg.GroqAPIKey != "" {
+		groqClient = ai.NewGroqClient(cfg.GroqAPIKey)
+		log.Println("✓ Groq AI ready (FREE — llama-3.3-70b)")
+	} else if cfg.AnthropicKey != "" {
+		aiClient = ai.NewClient(cfg.AnthropicKey)
 		log.Println("✓ Anthropic Claude ready")
+	} else {
+		log.Println("⚠  No AI provider configured — set GROQ_API_KEY or ANTHROPIC_API_KEY")
 	}
 
 	// ── Handlers ──────────────────────────────────────────
@@ -57,7 +64,7 @@ func main() {
 	})
 	projH := handlers.NewProjectsHandler(pool)
 	filesH := handlers.NewFilesHandler(pool)
-	chatH := handlers.NewChatHandler(pool, aiClient)
+	chatH := handlers.NewChatHandler(pool, aiClient, groqClient)
 	versionsH := handlers.NewVersionsHandler(pool)
 	dupH := handlers.NewDuplicateHandler(pool)
 	exportH := handlers.NewExportHandler(pool)
@@ -96,6 +103,39 @@ func main() {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// Debug endpoint — check messages for any project directly
+	r.Get("/debug/messages/{projectId}", func(w http.ResponseWriter, r *http.Request) {
+		projectID := chi.URLParam(r, "projectId")
+		rows, err := pool.Query(r.Context(),
+			`SELECT id, role, content->>'text' as text, created_at 
+			 FROM messages WHERE project_id = $1 
+			 ORDER BY created_at ASC`, projectID)
+		if err != nil {
+			w.Write([]byte(`{"error":"` + err.Error() + `"}`))
+			return
+		}
+		defer rows.Close()
+		type row struct {
+			ID        string `json:"id"`
+			Role      string `json:"role"`
+			Text      string `json:"text"`
+			CreatedAt string `json:"created_at"`
+		}
+		var result []row
+		for rows.Next() {
+			var r row
+			rows.Scan(&r.ID, &r.Role, &r.Text, &r.CreatedAt)
+			result = append(result, r)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		data, _ := json.Marshal(map[string]any{
+			"project_id":    projectID,
+			"message_count": len(result),
+			"messages":      result,
+		})
+		w.Write(data)
 	})
 
 	// Auth (public)
