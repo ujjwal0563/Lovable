@@ -15,21 +15,21 @@ import (
 )
 
 type ChatHandler struct {
-	db         *pgxpool.Pool
-	aiClient   *ai.Client
-	groqClient *ai.GroqClient
+	db           *pgxpool.Pool
+	aiClient     *ai.Client
+	groqClient   *ai.GroqClient
+	geminiClient *ai.GeminiClient
 }
 
-func NewChatHandler(db *pgxpool.Pool, aiClient *ai.Client, groqClient *ai.GroqClient) *ChatHandler {
-	return &ChatHandler{db: db, aiClient: aiClient, groqClient: groqClient}
+func NewChatHandler(db *pgxpool.Pool, aiClient *ai.Client, groqClient *ai.GroqClient, geminiClient *ai.GeminiClient) *ChatHandler {
+	return &ChatHandler{db: db, aiClient: aiClient, groqClient: groqClient, geminiClient: geminiClient}
 }
 
 type chatRequest struct {
 	Message  string   `json:"message"`
-	ImageIDs []string `json:"image_ids"` // optional — images to send to Claude
+	ImageIDs []string `json:"image_ids"`
 }
 
-// Stream handles POST /api/projects/:projectId/chat/stream — SSE endpoint.
 func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	userID := authmw.GetUserID(r)
 	projectID := chi.URLParam(r, "projectId")
@@ -53,16 +53,15 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	var imageDataURLs []string
 	for _, imgID := range req.ImageIDs {
 		var dataURL string
-		err := h.db.QueryRow(r.Context(),
+		if err := h.db.QueryRow(r.Context(),
 			`SELECT data_url FROM project_images WHERE id = $1 AND project_id = $2`,
 			imgID, projectID,
-		).Scan(&dataURL)
-		if err == nil {
+		).Scan(&dataURL); err == nil {
 			imageDataURLs = append(imageDataURLs, dataURL)
 		}
 	}
 
-	// Persist user message
+	// Save user message
 	userContent, _ := json.Marshal(map[string]string{"text": req.Message})
 	if _, err := h.db.Exec(r.Context(),
 		`INSERT INTO messages (project_id, role, content) VALUES ($1, 'user', $2)`,
@@ -72,9 +71,7 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rebuild conversation history for Claude
-	// We store messages as {"text":"..."} for user/assistant
-	// and {"tool_results":[...]} for tool responses
+	// Load conversation history
 	rows, err := h.db.Query(r.Context(),
 		`SELECT role, content FROM messages WHERE project_id = $1 ORDER BY created_at ASC`,
 		projectID,
@@ -83,7 +80,6 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "failed to load history", http.StatusInternalServerError)
 		return
 	}
-
 	var history []ai.Message
 	for rows.Next() {
 		var role string
@@ -91,9 +87,7 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&role, &raw); err != nil {
 			continue
 		}
-
-		switch role {
-		case "user", "assistant":
+		if role == "user" || role == "assistant" {
 			var stored struct {
 				Text string `json:"text"`
 			}
@@ -102,7 +96,7 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	rows.Close() // close explicitly before SSE starts
+	rows.Close()
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -125,91 +119,77 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var assistantText strings.Builder
 
-	// Use Groq if available, otherwise Anthropic
-	if h.groqClient != nil {
-		if err := h.groqClient.Stream(ctx, ai.StreamRequest{
-			Messages: history,
-			Images:   imageDataURLs,
-			OnToken: func(text string) {
-				assistantText.WriteString(text)
-				sendEvent(ai.StreamEvent{Type: "token", Content: text})
-			},
-			OnTool: func(id, name string, input json.RawMessage) (string, error) {
-				sendEvent(ai.StreamEvent{Type: "tool_start", ToolID: id, ToolName: name, Input: input})
-				result, err := h.executeTool(ctx, projectID, name, input)
-				if err != nil {
-					sendEvent(ai.StreamEvent{Type: "tool_error", ToolID: id, Error: err.Error()})
-					return "", err
-				}
-				sendEvent(ai.StreamEvent{Type: "tool_done", ToolID: id, ToolName: name, Result: result})
-				return result, nil
-			},
-			OnDone: func(_ []ai.Message) {
-				// Save both user and assistant messages using background goroutine
-				// so SSE connection is not blocked
-				text := assistantText.String()
-				if text == "" {
-					text = "Done! Files updated."
-				}
-				go func() {
-					content, _ := json.Marshal(map[string]string{"text": text})
-					h.db.Exec(context.Background(),
-						`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
-						projectID, content,
-					)
-				}()
-				sendEvent(ai.StreamEvent{Type: "done"})
-			},
-		}); err != nil {
+	// Shared callbacks
+	onToken := func(text string) {
+		assistantText.WriteString(text)
+		sendEvent(ai.StreamEvent{Type: "token", Content: text})
+	}
+
+	onTool := func(id, name string, input json.RawMessage) (string, error) {
+		sendEvent(ai.StreamEvent{Type: "tool_start", ToolID: id, ToolName: name, Input: input})
+		result, err := h.executeTool(ctx, projectID, name, input)
+		if err != nil {
+			sendEvent(ai.StreamEvent{Type: "tool_error", ToolID: id, Error: err.Error()})
+			return "", err
+		}
+		sendEvent(ai.StreamEvent{Type: "tool_done", ToolID: id, ToolName: name, Result: result})
+		return result, nil
+	}
+
+	onDone := func(_ []ai.Message) {
+		text := assistantText.String()
+		if text == "" {
+			text = "Done! Files updated."
+		}
+		go func() {
+			content, _ := json.Marshal(map[string]string{"text": text})
+			h.db.Exec(context.Background(),
+				`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
+				projectID, content,
+			)
+		}()
+		sendEvent(ai.StreamEvent{Type: "done"})
+	}
+
+	streamReq := ai.StreamRequest{
+		Messages: history,
+		Images:   imageDataURLs,
+		OnToken:  onToken,
+		OnTool:   onTool,
+		OnDone:   onDone,
+	}
+
+	// Pick AI provider: Gemini → Groq → Anthropic
+	if h.geminiClient != nil {
+		if err := h.geminiClient.Stream(ctx, streamReq); err != nil {
 			sendEvent(ai.StreamEvent{Type: "error", Error: err.Error()})
 		}
 		return
 	}
 
-	if h.aiClient == nil {
-		sendEvent(ai.StreamEvent{Type: "error", Error: "no AI provider configured — set GROQ_API_KEY or ANTHROPIC_API_KEY in .env"})
+	if h.groqClient != nil {
+		streamReq.Images = nil // Groq doesn't support images
+		if err := h.groqClient.Stream(ctx, streamReq); err != nil {
+			sendEvent(ai.StreamEvent{Type: "error", Error: err.Error()})
+		}
 		return
 	}
 
-	if err := h.aiClient.Stream(ctx, ai.StreamRequest{
-		Messages: history,
-		Images:   imageDataURLs,
-		OnToken: func(text string) {
-			assistantText.WriteString(text)
-			sendEvent(ai.StreamEvent{Type: "token", Content: text})
-		},
-		OnTool: func(id, name string, input json.RawMessage) (string, error) {
-			sendEvent(ai.StreamEvent{Type: "tool_start", ToolID: id, ToolName: name, Input: input})
-			result, err := h.executeTool(ctx, projectID, name, input)
-			if err != nil {
-				sendEvent(ai.StreamEvent{Type: "tool_error", ToolID: id, Error: err.Error()})
-				return "", err
-			}
-			sendEvent(ai.StreamEvent{Type: "tool_done", ToolID: id, ToolName: name, Result: result})
-			return result, nil
-		},
-		OnDone: func(_ []ai.Message) {
-			// Persist assistant reply
-			if text := assistantText.String(); text != "" {
-				content, _ := json.Marshal(map[string]string{"text": text})
-				h.db.Exec(ctx,
-					`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
-					projectID, content,
-				)
-			}
-			sendEvent(ai.StreamEvent{Type: "done"})
-		},
-	}); err != nil {
-		sendEvent(ai.StreamEvent{Type: "error", Error: err.Error()})
+	if h.aiClient != nil {
+		if err := h.aiClient.Stream(ctx, streamReq); err != nil {
+			sendEvent(ai.StreamEvent{Type: "error", Error: err.Error()})
+		}
+		return
 	}
+
+	sendEvent(ai.StreamEvent{Type: "error", Error: "no AI provider configured — set GEMINI_API_KEY or GROQ_API_KEY in .env"})
 }
 
-// GetMessages returns chat history (user + assistant only) for a project.
+// GetMessages returns chat history for a project
 func (h *ChatHandler) GetMessages(w http.ResponseWriter, r *http.Request) {
 	userID := authmw.GetUserID(r)
 	projectID := chi.URLParam(r, "projectId")
 
-	// Check project ownership
 	var ownerID string
 	if err := h.db.QueryRow(r.Context(),
 		`SELECT user_id FROM projects WHERE id = $1`, projectID,
@@ -229,7 +209,7 @@ func (h *ChatHandler) GetMessages(w http.ResponseWriter, r *http.Request) {
 		projectID,
 	)
 	if err != nil {
-		writeError(w, "failed to load messages: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, "failed to load messages", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -251,7 +231,7 @@ func (h *ChatHandler) GetMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, msgs, http.StatusOK)
 }
 
-// executeTool runs a single tool call against the project's file store.
+// executeTool runs a tool call
 func (h *ChatHandler) executeTool(ctx context.Context, projectID, toolName string, input json.RawMessage) (string, error) {
 	switch toolName {
 	case "write_file":
@@ -303,7 +283,7 @@ func (h *ChatHandler) executeTool(ctx context.Context, projectID, toolName strin
 		var paths []string
 		for rows.Next() {
 			var p string
-			_ = rows.Scan(&p)
+			rows.Scan(&p)
 			paths = append(paths, p)
 		}
 		out, _ := json.Marshal(paths)
@@ -329,7 +309,6 @@ func (h *ChatHandler) executeTool(ctx context.Context, projectID, toolName strin
 		if err := json.Unmarshal(input, &args); err != nil {
 			return "", fmt.Errorf("invalid args: %w", err)
 		}
-		// E2B sandbox integration point — for now acknowledge
 		return fmt.Sprintf("command noted: %s", args.Command), nil
 
 	default:
