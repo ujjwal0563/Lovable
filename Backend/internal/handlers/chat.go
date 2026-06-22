@@ -61,7 +61,7 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Save user message
+	// Save user message to DB
 	userContent, _ := json.Marshal(map[string]string{"text": req.Message})
 	if _, err := h.db.Exec(r.Context(),
 		`INSERT INTO messages (project_id, role, content) VALUES ($1, 'user', $2)`,
@@ -119,47 +119,48 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var assistantText strings.Builder
 
-	// Shared callbacks
-	onToken := func(text string) {
-		assistantText.WriteString(text)
-		sendEvent(ai.StreamEvent{Type: "token", Content: text})
-	}
-
-	onTool := func(id, name string, input json.RawMessage) (string, error) {
-		sendEvent(ai.StreamEvent{Type: "tool_start", ToolID: id, ToolName: name, Input: input})
-		result, err := h.executeTool(ctx, projectID, name, input)
-		if err != nil {
-			sendEvent(ai.StreamEvent{Type: "tool_error", ToolID: id, Error: err.Error()})
-			return "", err
-		}
-		sendEvent(ai.StreamEvent{Type: "tool_done", ToolID: id, ToolName: name, Result: result})
-		return result, nil
-	}
-
-	onDone := func(_ []ai.Message) {
-		text := assistantText.String()
-		if text == "" {
-			text = "Done! Files updated."
-		}
-		go func() {
-			content, _ := json.Marshal(map[string]string{"text": text})
-			h.db.Exec(context.Background(),
-				`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
-				projectID, content,
-			)
-		}()
-		sendEvent(ai.StreamEvent{Type: "done"})
-	}
-
+	// Build shared callbacks
 	streamReq := ai.StreamRequest{
 		Messages: history,
 		Images:   imageDataURLs,
-		OnToken:  onToken,
-		OnTool:   onTool,
-		OnDone:   onDone,
+
+		OnToken: func(text string) {
+			assistantText.WriteString(text)
+			sendEvent(ai.StreamEvent{Type: "token", Content: text})
+		},
+
+		OnTool: func(id, name string, input json.RawMessage) (string, error) {
+			sendEvent(ai.StreamEvent{Type: "tool_start", ToolID: id, ToolName: name, Input: input})
+			result, err := h.executeTool(ctx, projectID, name, input)
+			if err != nil {
+				sendEvent(ai.StreamEvent{Type: "tool_error", ToolID: id, Error: err.Error()})
+				return "", err
+			}
+			sendEvent(ai.StreamEvent{Type: "tool_done", ToolID: id, ToolName: name, Result: result})
+			return result, nil
+		},
+
+		OnDone: func(_ []ai.Message) {
+			// Get accumulated text or use default
+			text := assistantText.String()
+			if text == "" {
+				text = "Done!"
+			}
+			// Save to DB using background context — never gets cancelled
+			pID := projectID
+			t := text
+			go func() {
+				content, _ := json.Marshal(map[string]string{"text": t})
+				h.db.Exec(context.Background(),
+					`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
+					pID, content,
+				)
+			}()
+			sendEvent(ai.StreamEvent{Type: "done"})
+		},
 	}
 
-	// Pick AI provider: Gemini → Groq → Anthropic
+	// Pick AI — Gemini → Groq → Anthropic
 	if h.geminiClient != nil {
 		if err := h.geminiClient.Stream(ctx, streamReq); err != nil {
 			sendEvent(ai.StreamEvent{Type: "error", Error: err.Error()})
@@ -182,7 +183,7 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sendEvent(ai.StreamEvent{Type: "error", Error: "no AI provider configured — set GEMINI_API_KEY or GROQ_API_KEY in .env"})
+	sendEvent(ai.StreamEvent{Type: "error", Error: "no AI provider configured — set GROQ_API_KEY in .env"})
 }
 
 // GetMessages returns chat history for a project
@@ -194,11 +195,11 @@ func (h *ChatHandler) GetMessages(w http.ResponseWriter, r *http.Request) {
 	if err := h.db.QueryRow(r.Context(),
 		`SELECT user_id FROM projects WHERE id = $1`, projectID,
 	).Scan(&ownerID); err != nil {
-		writeError(w, "project not found - invalid projectId", http.StatusNotFound)
+		writeError(w, "project not found", http.StatusNotFound)
 		return
 	}
 	if ownerID != userID {
-		writeError(w, "project not found - wrong user", http.StatusNotFound)
+		writeError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
@@ -273,9 +274,7 @@ func (h *ChatHandler) executeTool(ctx context.Context, projectID, toolName strin
 
 	case "list_files":
 		rows, err := h.db.Query(ctx,
-			`SELECT path FROM project_files WHERE project_id = $1 ORDER BY path`,
-			projectID,
-		)
+			`SELECT path FROM project_files WHERE project_id = $1 ORDER BY path`, projectID)
 		if err != nil {
 			return "", fmt.Errorf("db error: %w", err)
 		}
@@ -296,10 +295,7 @@ func (h *ChatHandler) executeTool(ctx context.Context, projectID, toolName strin
 		if err := json.Unmarshal(input, &args); err != nil {
 			return "", fmt.Errorf("invalid args: %w", err)
 		}
-		h.db.Exec(ctx,
-			`DELETE FROM project_files WHERE project_id = $1 AND path = $2`,
-			projectID, args.Path,
-		)
+		h.db.Exec(ctx, `DELETE FROM project_files WHERE project_id = $1 AND path = $2`, projectID, args.Path)
 		return "deleted " + args.Path, nil
 
 	case "run_command":
