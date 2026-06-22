@@ -13,6 +13,7 @@ type Config struct {
 	JWTSecret          string
 	AnthropicKey       string
 	GroqAPIKey         string
+	GeminiAPIKey       string
 	AIProvider         string
 	E2BApiKey          string
 	FrontendOrigin     string
@@ -36,7 +37,8 @@ func Load() *Config {
 		JWTSecret:          getEnv("JWT_SECRET", "change-me-in-production"),
 		AnthropicKey:       getEnv("ANTHROPIC_API_KEY", ""),
 		GroqAPIKey:         getEnv("GROQ_API_KEY", ""),
-		AIProvider:         getEnv("AI_PROVIDER", "anthropic"),
+		GeminiAPIKey:       getEnv("GEMINI_API_KEY", ""),
+		AIProvider:         getEnv("AI_PROVIDER", "gemini"),
 		E2BApiKey:          getEnv("E2B_API_KEY", ""),
 		FrontendOrigin:     getEnv("FRONTEND_ORIGIN", "http://localhost:5173"),
 		SMTPHost:           getEnv("SMTP_HOST", "smtp.gmail.com"),
@@ -53,8 +55,8 @@ func Load() *Config {
 	if cfg.DatabaseURL == "" {
 		log.Println("WARNING: DATABASE_URL not set")
 	}
-	if cfg.AnthropicKey == "" {
-		log.Println("WARNING: ANTHROPIC_API_KEY not set — AI chat will not work")
+	if cfg.GeminiAPIKey == "" && cfg.GroqAPIKey == "" && cfg.AnthropicKey == "" {
+		log.Println("WARNING: No AI key set — set GEMINI_API_KEY in .env")
 	}
 
 	return cfg
