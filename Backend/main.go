@@ -38,18 +38,39 @@ func main() {
 		log.Println("⚠  SMTP not configured — password reset emails will be printed to stdout")
 	}
 
-	// ── AI client ─────────────────────────────────────────
+	// ── AI client — respects AI_PROVIDER setting ──────────
 	var aiClient *ai.Client
 	var groqClient *ai.GroqClient
+	var geminiClient *ai.GeminiClient
 
-	if cfg.AIProvider == "groq" && cfg.GroqAPIKey != "" {
-		groqClient = ai.NewGroqClient(cfg.GroqAPIKey)
-		log.Println("✓ Groq AI ready (FREE — llama-3.3-70b)")
-	} else if cfg.AnthropicKey != "" {
-		aiClient = ai.NewClient(cfg.AnthropicKey)
-		log.Println("✓ Anthropic Claude ready")
-	} else {
-		log.Println("⚠  No AI provider configured — set GROQ_API_KEY or ANTHROPIC_API_KEY")
+	switch cfg.AIProvider {
+	case "gemini":
+		if cfg.GeminiAPIKey != "" {
+			geminiClient = ai.NewGeminiClient(cfg.GeminiAPIKey, nil)
+			log.Println("✓ Gemini 2.0 Flash ready (FREE + Vision)")
+		} else {
+			log.Println("⚠  GEMINI_API_KEY not set — falling back to Groq")
+			if cfg.GroqAPIKey != "" {
+				groqClient = ai.NewGroqClient(cfg.GroqAPIKey)
+				log.Println("✓ Groq AI ready (fallback)")
+			}
+		}
+	case "groq":
+		if cfg.GroqAPIKey != "" {
+			groqClient = ai.NewGroqClient(cfg.GroqAPIKey)
+			log.Println("✓ Groq AI ready (FREE)")
+		} else {
+			log.Println("⚠  GROQ_API_KEY not set")
+		}
+	case "anthropic":
+		if cfg.AnthropicKey != "" {
+			aiClient = ai.NewClient(cfg.AnthropicKey)
+			log.Println("✓ Anthropic Claude ready")
+		} else {
+			log.Println("⚠  ANTHROPIC_API_KEY not set")
+		}
+	default:
+		log.Println("⚠  No AI provider configured — set AI_PROVIDER in .env")
 	}
 
 	// ── Handlers ──────────────────────────────────────────
@@ -64,7 +85,7 @@ func main() {
 	})
 	projH := handlers.NewProjectsHandler(pool)
 	filesH := handlers.NewFilesHandler(pool)
-	chatH := handlers.NewChatHandler(pool, aiClient, groqClient)
+	chatH := handlers.NewChatHandler(pool, aiClient, groqClient, geminiClient)
 	versionsH := handlers.NewVersionsHandler(pool)
 	dupH := handlers.NewDuplicateHandler(pool)
 	exportH := handlers.NewExportHandler(pool)
