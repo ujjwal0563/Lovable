@@ -220,7 +220,8 @@ func (c *GroqClient) Stream(ctx context.Context, req StreamRequest) error {
 		}
 	}
 
-	// ALWAYS call OnDone — this saves assistant message to DB
+	// Call OnDone AFTER tokens are streamed
+	// This ensures assistantText in chat.go is fully populated before saving
 	if req.OnDone != nil {
 		req.OnDone(req.Messages)
 	}
