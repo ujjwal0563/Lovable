@@ -141,21 +141,21 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		},
 
 		OnDone: func(_ []ai.Message) {
-			// Get accumulated text or use default
+			// Get accumulated text from OnToken calls
 			text := assistantText.String()
 			if text == "" {
 				text = "Done!"
 			}
-			// Save to DB using background context — never gets cancelled
-			pID := projectID
-			t := text
-			go func() {
-				content, _ := json.Marshal(map[string]string{"text": t})
-				h.db.Exec(context.Background(),
-					`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
-					pID, content,
-				)
-			}()
+			// Save assistant message to DB
+			content, _ := json.Marshal(map[string]string{"text": text})
+			_, dbErr := h.db.Exec(context.Background(),
+				`INSERT INTO messages (project_id, role, content) VALUES ($1, 'assistant', $2)`,
+				projectID, content,
+			)
+			if dbErr != nil {
+				// Log the error to terminal for debugging
+				fmt.Printf("[ERROR] Failed to save assistant message: %v\n", dbErr)
+			}
 			sendEvent(ai.StreamEvent{Type: "done"})
 		},
 	}
